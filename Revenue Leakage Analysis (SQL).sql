@@ -200,3 +200,95 @@ or discount_pct > 100;
 
 
 
+-- =====================================================
+-- Silver Layer: Order Items
+-- Purpose: Validate line-level pricing integrity
+-- =====================================================
+create or replace view silver_order_items as
+select
+	order_id,
+	product_id,
+	unit_price_usd,
+	quantity,
+	line_total_usd,
+unit_price_usd * quantity as expected_linetotal_usd ,  -- recalculating the line total to make sure it's correct
+(unit_price_usd * quantity) - line_total_usd as line_total_diff_usd,
+case
+when abs((unit_price_usd * quantity) - line_total_usd) > 0.01 then "Price Mismatch"
+else "Ok"
+end as price_status
+from bronze_order_items;
+
+-- =====================================================
+-- Silver Layer: Orders
+-- Purpose: Validate discount and order total integrity
+-- =====================================================
+select * from bronze_orders;
+create or replace view silver_orders as
+select
+	order_id,
+	customer_id,
+	order_time,
+	payment_method,
+	discount_pct,
+	subtotal_usd,
+	total_usd,
+	country,
+	device,
+	source,
+subtotal_usd * (1 - discount_pct/100 ) as expected_tota_usd,  -- expected total after applying the discount
+(subtotal_usd * (1 - discount_pct/100 )) - total_usd as discount_diff_usd, -- difference between the total_usd and expected_usd
+CASE
+	WHEN discount_pct < 0 or discount_pct > 80 then "Invalid_Discount"
+	WHEN ((subtotal_usd * (1 - discount_pct/100 )) - total_usd) > 0.01 then "Discount Mismatch"
+	Else "Ok"
+end as discount_status
+from bronze_orders;
+
+-- =====================================================
+-- Silver Layer: Products
+-- Purpose: Validate pricing and margin correctness
+-- =====================================================
+select * from bronze_products;
+create or replace view silver_products as 
+ select
+	 product_id,
+	 category,
+	 name,
+	 price_usd,
+	 cost_usd,
+	 margin_usd,
+price_usd - cost_usd as expected_margin, -- to check if the data is correct
+(price_usd - cost_usd) - margin_usd as margin_diff_usd, -- to check teh diff between the margin_usd and expected_margin
+CASE
+	WHEN cost_usd > price_usd THEN 'NEGATIVE_MARGIN'
+	WHEN ABS((price_usd - cost_usd) - margin_usd) > 0.01 THEN 'MARGIN_MISMATCH'
+	ELSE 'OK'
+END AS margin_status
+from bronze_products;
+
+-- =====================================================
+-- Silver Layer: Customers
+-- Purpose: Clean and prepare customer master data
+-- =====================================================
+
+create or replace view silver_customers as 
+select 
+	customer_id,
+	name,
+	email,
+	country,
+	age,
+	signup_date,
+	marketing_opt_in
+from bronze_customers;
+
+
+
+
+
+
+
+
+
+
