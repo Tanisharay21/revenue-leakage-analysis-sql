@@ -283,12 +283,182 @@ select
 	marketing_opt_in
 from bronze_customers;
 
+-- =====================================================
+-- Gold Layer: Revenue Leakage Summary
+-- Purpose: At the company level, are we losing money between what we should have earned vs what we actually earned?
+-- =====================================================
+create or replace view gold_revenue_leakage_summary as
+select 
+current_date() as analysis_date,
+round(sum(expected_linetotal_usd),2) as total_expected_revenue,
+round(sum(line_total_usd),2) as total_realized_revenue,
+round((sum(expected_linetotal_usd) - sum(line_total_usd)),2) as revenue_diff,
+round((sum(expected_linetotal_usd) - sum(line_total_usd))/nullif(sum(line_total_usd),0)*100,2) as revenue_leakage_pct
+from silver_order_items;
 
+select * from gold_revenue_leakage_summary;
 
+-- =====================================================
+-- Purpose: Which products are responsible for the highest revenue leakage?
+-- =====================================================
 
+create or replace view gold_product_revenue_leakage as
+select 
+	p.product_id,
+	p.name as product_name,
+	p.category as product_category,
+    
+	sum(oi.quantity) as total_unit_sold,
 
+	round(sum(expected_linetotal_usd),2) as expected_revenue,
+	round(sum(line_total_usd),2) as realized_revenue,
 
+	round((sum(expected_linetotal_usd)) - (sum(line_total_usd)),2) as revenue_leakage,
 
+	round(((sum(expected_linetotal_usd)) - (sum(line_total_usd))) / nullif(sum(expected_linetotal_usd),0)*100,2) as revenue_leakage_pct
 
+from silver_order_items as oi
+join silver_products as p
+on oi.product_id = p.product_id
+group by 
+	p.product_id,
+	product_name,
+	product_category;
 
+select* from gold_product_revenue_leakage;
 
+-- =====================================================
+-- Gold Layer: Discount Abuse Analysis
+-- Purpose: Which acquisition channels or sources are abusing or misapplying discounts?
+-- =====================================================
+
+create or replace view gold_discount_abuse_analysis as
+select
+	source,
+    count(order_id) as total_orders,
+	round(avg(discount_pct),2) as avg_discount_pct,
+    round(sum(subtotal_usd * discount_pct / 100),2) as total_discount_value_usd,
+    round(sum(discount_diff_usd),2) as discount_leakage_usd,
+case
+when avg(discount_pct) > 40
+	 or sum(discount_diff_usd) > 1000
+then "Yes" else "No"
+end as discount_abuse_flag
+from silver_orders
+group by source;
+select * from gold_discount_abuse_analysis;
+
+-- =====================================================
+-- Gold Layer: Customer Risk Profile
+-- Purpose: Which customers generate revenue but pose a financial risk due to discount misuse?
+-- =====================================================
+
+create or replace view gold_customer_risk_profile as 
+select 
+	c.customer_id,
+	c.country,
+	count(order_id) as total_orders,
+	round(sum(o.total_usd),2) as total_revenue,
+	round(sum(o.subtotal_usd * discount_pct/100),2) as total_discount_received,
+count(
+	case
+		when o.discount_status != "Ok" then o.order_id
+    end) as discount_mismatch_count,
+    
+    round(sum(o.discount_diff_usd),2) as total_dis_leakage,
+	round(sum(o.discount_diff_usd) / nullif(sum(o.total_usd), 0) * 100,2) AS leakage_pct_of_revenue,
+    
+    case
+		when sum(o.discount_diff_usd) > 500
+				and count(o.order_id) > 5
+			then "High"
+            when sum(o.discount_diff_usd) between 100 and 500
+            then "Medium"
+            else "Low"
+	end as risk_category
+
+from silver_orders o
+join silver_customers c
+    on o.customer_id = c.customer_id
+
+group by
+    c.customer_id,
+    c.country;
+
+ select *                                  -- CHECK
+ from gold_customer_risk_profile
+ where risk_category = "High"
+ order by total_dis_leakage desc;
+
+-- =====================================================
+-- Gold Layer: Margin Performance
+-- Purpose: Which products actually make money after accounting for cost?
+-- =====================================================
+
+CREATE OR REPLACE VIEW gold_margin_performance AS
+SELECT
+    p.product_id,
+    p.name AS product_name,
+    p.category AS product_category,
+
+    SUM(oi.quantity) AS total_units_sold,
+
+    ROUND(SUM(oi.line_total_usd), 2) AS total_revenue,
+
+    ROUND(SUM(p.cost_usd * oi.quantity), 2) AS total_cost,
+
+    ROUND(
+        SUM(oi.line_total_usd) - SUM(p.cost_usd * oi.quantity),
+        2
+    ) AS gross_profit,
+
+    ROUND(
+        (SUM(oi.line_total_usd) - SUM(p.cost_usd * oi.quantity))
+        / NULLIF(SUM(oi.line_total_usd), 0) * 100,
+        2
+    ) AS gross_margin_pct
+
+FROM silver_order_items oi
+JOIN silver_products p
+    ON oi.product_id = p.product_id
+
+GROUP BY
+    p.product_id,
+    p.name,
+    p.category;
+
+select * from gold_margin_performance;
+
+select * 
+from gold_margin_performance
+where gross_profit < 0; -- check fro negative marking
+
+select 
+	product_name,
+	product_category,
+	total_revenue,
+	gross_margin_pct
+from gold_margin_performance
+where gross_margin_pct < 10
+order by gross_margin_pct asc; -- to identify low-margin products
+
+select
+min(gross_margin_pct) as min_margin,
+max(gross_margin_pct) as max_margin,
+round(avg(gross_margin_pct),2) as avg_margin
+from gold_margin_performance; -- margin disctrinution check table
+
+ select 
+ product_name,
+ gross_profit
+ from gold_margin_performance
+ order by gross_profit desc
+ limit 10; -- top profit contrinutors
+
+SELECT
+    ROUND(SUM(total_revenue), 2) AS gold_revenue,
+    (
+        SELECT ROUND(SUM(line_total_usd), 2)
+        FROM silver_order_items
+    ) AS silver_revenue
+FROM gold_margin_performance;
