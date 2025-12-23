@@ -462,3 +462,78 @@ SELECT
         FROM silver_order_items
     ) AS silver_revenue
 FROM gold_margin_performance;
+
+-- =====================================================
+-- Gold Layer (Advanced): Customer Leakage Ranking
+-- Purpose:
+-- Rank customers by revenue leakage using window functions
+-- to identify top-risk customers relative to peers
+-- =====================================================
+
+create or replace view gold_customer_leakage_ranked  as
+with customer_leakage as(
+select 
+	c.customer_id,
+	c.country,
+
+	count(o.order_id) as total_orders,
+	round(sum(o.total_usd),2) as total_revenue,
+	round(sum(o.discount_diff_usd),2) as total_leakage
+
+from silver_orders as o
+join silver_customers as c
+	on o.customer_id = c.customer_id
+group by 
+o.customer_id,
+c.country )
+
+select 
+	customer_id,
+	country,
+	total_orders,
+	total_revenue,
+	total_leakage,
+
+    rank() over(partition by country order by total_leakage desc) as leakage_rank_in_country, -- Rank customers by leakage within each country
+    round(percent_rank() over(partition by country order by total_leakage desc) * 100,2) as leakage_percentile, -- Percentile ranking for relative risk
+    
+case    
+when percent_rank() over(partition by country order by total_leakage desc) >= 0.90 then "High"  -- Risk categorization using percentile logic
+when percent_rank() over(partition by country order by total_leakage desc) >= 0.70 then "Medium"
+else "Low"
+end as risk_category
+
+from customer_leakage;
+
+--------------------------------------------------------------------
+-- Analysis we can perform on gold_customer_leakage_ranked
+--------------------------------------------------------------------
+select * from gold_customer_leakage_ranked;
+select * from gold_customer_leakage_ranked
+where risk_category = "High";
+
+select -- -- Check how leakage risk is distributed by country
+	country,
+	risk_category,
+	count(*) as customer_count
+from gold_customer_leakage_ranked
+group by country, risk_category
+order by country, risk_category;
+
+
+select  -- High revenue but high risk
+	customer_id,
+	total_revenue,
+	total_leakage,
+	leakage_percentile,
+	risk_category
+from gold_customer_leakage_ranked
+where risk_category = "High" and
+total_revenue > (select avg(total_revenue)
+					from gold_customer_leakage_ranked)
+order by total_leakage desc;
+
+select
+min(leakage_percentile) as min_percentile,
+max(leakage_percentile) as max_percentile
+from gold_customer_leakage_ranked;
